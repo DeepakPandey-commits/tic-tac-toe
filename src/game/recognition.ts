@@ -170,6 +170,33 @@ function diagonalCandidate(segment: Stroke) {
   return { box, length, angle, center };
 }
 
+// Deliberately more permissive than recognizeX's own thresholds: a false
+// positive here just means the cell keeps waiting a bit longer for the
+// second stroke, which is harmless. A false negative would prematurely
+// invalidate a legitimate in-progress X, which is the bug this guards.
+const PENDING_X_MIN_LENGTH = 0.12;
+// Kept under 45deg so a perfectly horizontal/vertical stroke (equidistant
+// from both diagonals) is correctly excluded rather than treated as pending.
+const PENDING_X_DIAGONAL_TOLERANCE = 40;
+
+/**
+ * True when exactly one plausible diagonal stroke has been drawn so far —
+ * i.e. this could be the first leg of an X, still waiting on the second.
+ * Callers should hold off on invalidating while this is true.
+ */
+export function isPendingXStroke(strokes: Stroke[]): boolean {
+  const meaningful = strokes.filter((s) => s.length >= 2 && pathLength(s) > 0.05);
+  if (meaningful.length !== 1) return false;
+
+  const candidate = diagonalCandidate(meaningful[0]);
+  if (candidate.length < PENDING_X_MIN_LENGTH) return false;
+
+  return (
+    angleDiff180(candidate.angle, 45) < PENDING_X_DIAGONAL_TOLERANCE ||
+    angleDiff180(candidate.angle, 135) < PENDING_X_DIAGONAL_TOLERANCE
+  );
+}
+
 export function recognizeX(strokes: Stroke[]): RecognitionResult {
   const meaningful = strokes.filter((s) => s.length >= 2 && pathLength(s) > 0.05);
   if (meaningful.length === 0) return INVALID;

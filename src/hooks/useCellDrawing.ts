@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Point, Stroke, SymbolKind } from "../types";
-import { isValidSymbol } from "../game/recognition";
+import { isPendingXStroke, isValidSymbol } from "../game/recognition";
 import { ACCENT_HEX } from "../game/colors";
 
 const TAP_MAX_DURATION_MS = 220;
 const TAP_MAX_MOVEMENT_RATIO = 0.045; // relative to cell size
-const IDLE_RECOGNITION_DELAY_MS = 480;
+// General idle window before an unresolved stroke is (re-)evaluated. Kept
+// short so a clearly-wrong scribble is rejected promptly.
+const IDLE_RECOGNITION_DELAY_MS = 600;
+// After a single plausible diagonal X stroke, give a much longer grace
+// period for the second stroke — lifting off a trackpad and repositioning
+// to draw the opposing diagonal routinely takes longer than a normal idle
+// window, and that pause must not read as "done, and invalid".
+const PENDING_X_IDLE_DELAY_MS = 4000;
 const CONFIDENCE_THRESHOLD = 0.42;
 const MAX_STROKES_PER_SESSION = 5;
 const MIN_STROKE_POINT_GAP = 0.006; // normalized units, throttles point capture
@@ -163,12 +170,25 @@ export function useCellDrawing({ active, symbol, onTap, onDrawSuccess, onInvalid
     [resetSession],
   );
 
-  const armIdleTimer = useCallback(() => {
-    clearIdleTimer();
-    idleTimerRef.current = window.setTimeout(() => {
-      runRecognition(true);
-    }, IDLE_RECOGNITION_DELAY_MS);
-  }, [clearIdleTimer, runRecognition]);
+  const armIdleTimer = useCallback(
+    (delayMs: number = IDLE_RECOGNITION_DELAY_MS) => {
+      clearIdleTimer();
+      idleTimerRef.current = window.setTimeout(() => {
+        runRecognition(true);
+      }, delayMs);
+    },
+    [clearIdleTimer, runRecognition],
+  );
+
+  // Symbol-aware idle delay: a lone plausible diagonal is treated as a
+  // pending X and gets a much longer grace period than a stroke that's
+  // already ambiguous or belongs to O.
+  const nextIdleDelay = useCallback(() => {
+    if (symbolRef.current === "X" && isPendingXStroke(strokesRef.current)) {
+      return PENDING_X_IDLE_DELAY_MS;
+    }
+    return IDLE_RECOGNITION_DELAY_MS;
+  }, []);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -228,7 +248,7 @@ export function useCellDrawing({ active, symbol, onTap, onDrawSuccess, onInvalid
 
       if (cancelled) {
         scheduleRedraw();
-        if (strokesRef.current.length > 0) armIdleTimer();
+        if (strokesRef.current.length > 0) armIdleTimer(nextIdleDelay());
         return;
       }
 
@@ -260,13 +280,26 @@ export function useCellDrawing({ active, symbol, onTap, onDrawSuccess, onInvalid
       }
 
       const resolved = runRecognition(false);
-      if (!resolved) armIdleTimer();
+      if (!resolved) armIdleTimer(nextIdleDelay());
     },
-    [armIdleTimer, resetSession, runRecognition, scheduleRedraw],
+    [armIdleTimer, nextIdleDelay, resetSession, runRecognition, scheduleRedraw],
   );
 
   const onPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => finishPointer(e, false), [finishPointer]);
   const onPointerCancel = useCallback((e: React.PointerEvent<HTMLDivElement>) => finishPointer(e, true), [finishPointer]);
+
+  // Safety net: pointer capture is guaranteed by spec to fire this when
+  // capture ends by any means. If a browser ever fails to deliver a
+  // pointerup/pointercancel for a captured pointer (rare edge case), this
+  // still runs finishPointer's cleanup so the pointer id is released and
+  // never blocks the next stroke. No-ops when pointerup/cancel already ran.
+  const onLostPointerCapture = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (pointerIdRef.current !== e.pointerId) return;
+      finishPointer(e, true);
+    },
+    [finishPointer],
+  );
 
   useEffect(() => () => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
@@ -277,6 +310,6 @@ export function useCellDrawing({ active, symbol, onTap, onDrawSuccess, onInvalid
     containerRef,
     canvasRef,
     isDrawing,
-    handlers: { onPointerDown, onPointerMove, onPointerUp, onPointerCancel },
+    handlers: { onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onLostPointerCapture },
   };
 }
